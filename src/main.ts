@@ -400,15 +400,9 @@ class FindAndReplaceModal extends Modal {
                 return;
             }
             const flags = regexFlags;
-            const selOnly = selToggleComponent.getValue();
-            let targetText = selOnly ? editor.getSelection() : editor.getValue();
-            let startOffset = 0;
-            if (selOnly) {
-                try {
-                    const fromPos = editor.getCursor('from');
-                    startOffset = (editor as any).posToOffset(fromPos) ?? 0;
-                } catch (e) { startOffset = 0; }
-            }
+            // Preview & editor highlight should always consider the full document
+            const targetText = editor.getValue();
+            const startOffset = 0;
             try {
                 const re = new RegExp(pattern, flags);
                 const ranges: { from: number; to: number }[] = [];
@@ -427,76 +421,86 @@ class FindAndReplaceModal extends Modal {
                 previewInfo.setText(`Matches: ${ranges.length}`);
                 findRegexFlags.setText('/' + flags + ` • Matches: ${ranges.length}`);
                 this.plugin.setHighlights(ranges);
-                // Group by line and render per-line with all matches bolded
+                // Render per-match blocks: previous line, matched line (sky-blue background), next line
                 previewList.empty();
                 const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                const lineMap = new Map<number, { lineText: string; ranges: { startRel: number; endRel: number }[] }>();
-                for (const it of items) {
+                const getMaxLine = (): number | null => {
+                    try {
+                        if ((editor as any).lastLine) return (editor as any).lastLine();
+                        if ((editor as any).lineCount) return (editor as any).lineCount() - 1;
+                    } catch (_) {}
+                    return null;
+                };
+                const maxBlocks = 200;
+                const showItems = items.slice(0, maxBlocks);
+                const maxLine = getMaxLine();
+                for (const it of showItems) {
                     const fromPos = (editor as any).offsetToPos(it.from);
-                    const lineStartOffset = (editor as any).posToOffset({ line: fromPos.line, ch: 0 });
-                    const startRel = it.from - lineStartOffset;
-                    const endRel = it.to - lineStartOffset;
-                    let entry = lineMap.get(fromPos.line);
-                    if (!entry) {
-                        const lineText = editor.getRange({ line: fromPos.line, ch: 0 }, { line: fromPos.line, ch: 1000000 });
-                        entry = { lineText, ranges: [] };
-                        lineMap.set(fromPos.line, entry);
-                    }
-                    entry.ranges.push({ startRel, endRel });
-                }
+                    const toPos = (editor as any).offsetToPos(it.to);
+                    const lineIdx = fromPos.line;
+                    const prevIdx = lineIdx > 0 ? lineIdx - 1 : null;
+                    const nextIdx = maxLine != null && lineIdx < maxLine ? lineIdx + 1 : null;
 
-                // Sort lines ascending
-                const sortedLines = Array.from(lineMap.entries()).sort((a, b) => a[0] - b[0]);
-                const maxLines = 200;
-                for (let i = 0; i < Math.min(sortedLines.length, maxLines); i++) {
-                    const [lineIndex, entry] = sortedLines[i];
-                    const { lineText } = entry;
-                    const ranges = entry.ranges
-                        .filter(r => r.endRel > r.startRel)
-                        .sort((a, b) => a.startRel - b.startRel);
-                    // Merge overlapping ranges
-                    const merged: { startRel: number; endRel: number }[] = [];
-                    for (const r of ranges) {
-                        if (!merged.length || r.startRel > merged[merged.length - 1].endRel) {
-                            merged.push({ ...r });
-                        } else {
-                            merged[merged.length - 1].endRel = Math.max(merged[merged.length - 1].endRel, r.endRel);
+                    const getLineText = (idx: number | null): string => {
+                        if (idx == null) return '';
+                        try {
+                            return editor.getRange({ line: idx, ch: 0 }, { line: idx, ch: 1000000 });
+                        } catch (_) {
+                            return '';
                         }
-                    }
-                    let cursor = 0;
-                    let html = '';
-                    for (const r of merged) {
-                        if (r.startRel > cursor) {
-                            html += escapeHtml(lineText.slice(cursor, r.startRel));
-                        }
-                        html += `<strong>${escapeHtml(lineText.slice(r.startRel, r.endRel))}</strong>`;
-                        cursor = r.endRel;
-                    }
-                    html += escapeHtml(lineText.slice(cursor));
+                    };
 
-                    const el = previewList.createDiv({ cls: 'preview-item' });
-                    const contentEl = el.createEl('div', { cls: 'preview-line-content' });
-                    contentEl.innerHTML = html;
-                    const lineEl = el.createEl('div', { cls: 'preview-line-number', text: String(lineIndex + 1) });
-                    lineEl.addEventListener('click', (ev) => {
+                    const block = previewList.createDiv({ cls: 'preview-item preview-block' });
+                    const numEl = block.createEl('div', { cls: 'preview-line-number', text: String(lineIdx + 1) });
+                    numEl.addEventListener('click', (ev) => {
                         ev.stopPropagation();
-                        editor.setCursor({ line: lineIndex, ch: 0 });
+                        if (typeof (editor as any).focus === 'function') (editor as any).focus();
+                        editor.setCursor({ line: lineIdx, ch: 0 });
+                        // Prefer CM6 view scroll for reliability
+                        const cm = this.plugin['getCurrentEditorView']?.call(this.plugin) as any;
+                        const offset = (editor as any).posToOffset({ line: lineIdx, ch: 0 });
+                        if (cm && typeof cm.scrollIntoView === 'function') cm.scrollIntoView(offset);
+                        else if ((editor as any).scrollIntoView) (editor as any).scrollIntoView({ from: { line: lineIdx, ch: 0 }, to: { line: lineIdx, ch: 0 } });
                     });
-                    el.addEventListener('click', () => {
-                        if (merged.length > 0) {
-                            const fromAbs = (editor as any).posToOffset({ line: lineIndex, ch: merged[0].startRel });
-                            const toAbs = (editor as any).posToOffset({ line: lineIndex, ch: merged[0].endRel });
-                            const from = (editor as any).offsetToPos(fromAbs);
-                            const to = (editor as any).offsetToPos(toAbs);
-                            editor.setSelection(from, to);
-                        } else {
-                            editor.setCursor({ line: lineIndex, ch: 0 });
-                        }
+
+                    const addLine = (idx: number | null, html: string, cls: string) => {
+                        const row = block.createEl('div', { cls: `preview-context-line ${cls}` });
+                        row.innerHTML = html;
+                    };
+
+                    // prev line
+                    const prevText = escapeHtml(getLineText(prevIdx));
+                    if (prevIdx != null) addLine(prevIdx, prevText, 'prev');
+
+                    // matched line with sky-blue background for the specific match
+                    const lineText = getLineText(lineIdx);
+                    const lineStartOffset = (editor as any).posToOffset({ line: lineIdx, ch: 0 });
+                    const relStart = it.from - lineStartOffset;
+                    const relEnd = it.to - lineStartOffset;
+                    let matchedHtml = '';
+                    matchedHtml += escapeHtml(lineText.slice(0, relStart));
+                    matchedHtml += `<span class="preview-match">${escapeHtml(lineText.slice(relStart, relEnd))}</span>`;
+                    matchedHtml += escapeHtml(lineText.slice(relEnd));
+                    addLine(lineIdx, matchedHtml, 'match');
+
+                    // next line
+                    const nextText = escapeHtml(getLineText(nextIdx));
+                    if (nextIdx != null) addLine(nextIdx, nextText, 'next');
+
+                    // Click block to select the specific match and scroll
+                    block.addEventListener('click', () => {
+                        const from = (editor as any).offsetToPos(it.from);
+                        const to = (editor as any).offsetToPos(it.to);
+                        if (typeof (editor as any).focus === 'function') (editor as any).focus();
+                        editor.setSelection(from, to);
+                        const cm = this.plugin['getCurrentEditorView']?.call(this.plugin) as any;
+                        if (cm && typeof cm.scrollIntoView === 'function') cm.scrollIntoView(it.from);
+                        else if ((editor as any).scrollIntoView) (editor as any).scrollIntoView({ from, to });
                     });
                 }
-                if (sortedLines.length > maxLines) {
+                if (items.length > maxBlocks) {
                     const more = previewList.createDiv({ cls: 'preview-more' });
-                    more.setText(`… ${sortedLines.length - maxLines} more lines`);
+                    more.setText(`… ${items.length - maxBlocks} more matches`);
                 }
             } catch (e) {
                 previewInfo.setText('Invalid regex');

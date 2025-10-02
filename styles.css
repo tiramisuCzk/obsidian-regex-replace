@@ -52,8 +52,8 @@
 
 /* Regex match highlight in editor */
 .cm-content .regex-highlight {
-    background: rgba(255, 220, 80, 0.35);
-    outline: 1px solid rgba(255, 180, 0, 0.6);
+    background: rgba(135, 206, 235, 0.35); /* sky blue */
+    outline: 1px solid rgba(135, 206, 235, 0.8);
 }
 
 /* Preview info and list */
@@ -82,8 +82,22 @@
     color: var(--text-normal);
     white-space: pre-wrap;
 }
-.find-replace-modal .modal-content .preview-line-content strong {
-    font-weight: 700;
+.find-replace-modal .modal-content .preview-line-content .preview-match {
+    background: rgba(135, 206, 235, 0.35); /* sky blue */
+    border-radius: 3px;
+    padding: 0 1px;
+}
+.find-replace-modal .modal-content .preview-item.preview-block {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    margin: 6px 0;
+}
+.find-replace-modal .modal-content .preview-context-line {
+    white-space: pre-wrap;
 }
 .find-replace-modal .modal-content .preview-line-number {
     min-width: 44px;
