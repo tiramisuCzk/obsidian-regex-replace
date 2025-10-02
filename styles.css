@@ -49,3 +49,47 @@
 	justify-content: center;
 	margin-top: 16px;
 }
+
+/* Regex match highlight in editor */
+.cm-content .regex-highlight {
+    background: rgba(255, 220, 80, 0.35);
+    outline: 1px solid rgba(255, 180, 0, 0.6);
+}
+
+/* Preview info and list */
+.find-replace-modal .modal-content .preview-info {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.find-replace-modal .modal-content .preview-list {
+    max-height: 240px;
+    overflow: auto;
+    border: 1px solid var(--background-modifier-border);
+    padding: 6px 8px;
+    border-radius: 6px;
+    margin-top: 6px;
+}
+
+.find-replace-modal .modal-content .preview-item {
+    display: flex;
+    gap: 8px;
+    padding: 2px 0;
+    align-items: baseline;
+}
+.find-replace-modal .modal-content .preview-index {
+    color: var(--text-muted);
+    width: 24px;
+    text-align: right;
+}
+.find-replace-modal .modal-content .preview-text {
+    flex: 1;
+    color: var(--text-normal);
+}
+.find-replace-modal .modal-content .preview-pos {
+    color: var(--text-faint);
+}
+.find-replace-modal .modal-content .preview-more {
+    margin-top: 4px;
+    color: var(--text-muted);
+}

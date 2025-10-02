@@ -12,6 +12,8 @@ import {
     SuggestModal,
     MarkdownView
 } from 'obsidian';
+import { EditorView, Decoration, DecorationSet } from '@codemirror/view';
+import { RangeSetBuilder, StateField, StateEffect, StateEffectType } from '@codemirror/state';
 
 interface RfrPluginSettings {
     findText: string;
@@ -58,12 +60,36 @@ const logger = (logString: string, logLevel=0): void => {if (logLevel <= logThre
 
 export default class RegexFindReplacePlugin extends Plugin {
     settings: RfrPluginSettings;
+    highlightEffect: StateEffectType<{ ranges: { from: number; to: number }[] }>;
+    highlightField: StateField<DecorationSet>;
+    attachedViews: WeakSet<EditorView> = new WeakSet();
 
     async onload() {
         logger('Loading Plugin...', 9);
         await this.loadSettings();
 
         this.addSettingTab(new RegexFindReplaceSettingTab(this.app, this));
+
+        // Initialize highlight extension (for real-time regex match preview)
+        this.highlightEffect = StateEffect.define<{ ranges: { from: number; to: number }[] }>();
+        this.highlightField = StateField.define<DecorationSet>({
+            create() { return Decoration.none; },
+            update(deco: DecorationSet, tr: any) {
+                let next = deco;
+                for (const e of tr.effects) {
+                    if ((e as StateEffect<any>).is(this.highlightEffect)) {
+                        const builder = new RangeSetBuilder<Decoration>();
+                        const ranges = (e as any).value.ranges as { from: number; to: number }[];
+                        for (const r of ranges) {
+                            if (r.to > r.from) builder.add(r.from, r.to, Decoration.mark({ class: 'regex-highlight' }));
+                        }
+                        next = builder.finish();
+                    }
+                }
+                return next;
+            },
+            provide: (f: StateField<DecorationSet>) => EditorView.decorations.from(f)
+        });
 
 
         this.addCommand({
@@ -146,6 +172,43 @@ export default class RegexFindReplacePlugin extends Plugin {
         return flags;
     }
 
+    private getCurrentEditorView(): EditorView | undefined {
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        const cm: EditorView | undefined = (view as any)?.editor?.cm as EditorView | undefined;
+        return cm;
+    }
+
+    ensureHighlightAttached(): void {
+        const cm = this.getCurrentEditorView();
+        if (!cm) return;
+        if (!(this.attachedViews as any).has(cm)) {
+            cm.dispatch({ effects: StateEffect.appendConfig.of(this.highlightField) });
+            this.attachedViews.add(cm);
+        }
+    }
+
+    setHighlights(ranges: { from: number; to: number }[]): void {
+        const cm = this.getCurrentEditorView();
+        if (!cm) return;
+        this.ensureHighlightAttached();
+        cm.dispatch({ effects: (this.highlightEffect as any).of({ ranges }) });
+    }
+
+    clearHighlights(): void {
+        const cm = this.getCurrentEditorView();
+        if (!cm) return;
+        this.ensureHighlightAttached();
+        cm.dispatch({ effects: (this.highlightEffect as any).of({ ranges: [] }) });
+    }
+
+    detachHighlight(): void {
+        const cm = this.getCurrentEditorView();
+        if (!cm) return;
+        cm.dispatch({ effects: StateEffect.reconfigure.of([]) });
+        // Clearing local registry
+        try { (this.attachedViews as any).delete(cm); } catch {}
+    }
+
     saveOrUpdateExpression(expr: SavedExpression): void {
         const idx = this.settings.savedExpressions.findIndex(e => e.name === expr.name);
         if (idx >= 0) this.settings.savedExpressions[idx] = expr; else this.settings.savedExpressions.push(expr);
@@ -224,16 +287,16 @@ export default class RegexFindReplacePlugin extends Plugin {
 }
 
 class FindAndReplaceModal extends Modal {
-	constructor(app: App, editor: Editor, settings: RfrPluginSettings, plugin: Plugin) {
-		super(app);
-		this.editor = editor;
-		this.settings = settings;
-		this.plugin = plugin;
-	}
+    constructor(app: App, editor: Editor, settings: RfrPluginSettings, plugin: RegexFindReplacePlugin) {
+        super(app);
+        this.editor = editor;
+        this.settings = settings;
+        this.plugin = plugin;
+    }
 
-	settings: RfrPluginSettings;
-	editor: Editor;
-	plugin: Plugin;
+    settings: RfrPluginSettings;
+    editor: Editor;
+    plugin: RegexFindReplacePlugin;
 
 	onOpen() {
 		const { contentEl, titleEl, editor, modalEl } = this;
@@ -302,6 +365,13 @@ class FindAndReplaceModal extends Modal {
 		const replaceRow = addTextComponent('Replace:', 'e.g. $1', this.settings.processLineBreak ? '\\n=LF' : '');
 		const replaceWithInputComponent = replaceRow[0];
 
+        // Preview info (matches count)
+        const previewInfo = contentEl.createDiv({ cls: 'row' });
+        previewInfo.addClass('preview-info');
+        previewInfo.setText('Matches: 0');
+        // Preview list (each match entry)
+        const previewList = contentEl.createDiv({ cls: 'preview-list' });
+
 		// Create and show regular expression toggle switch
 		const regToggleComponent = addToggleComponent('Use regular expressions', 'If enabled, regular expressions in the find field are processed as such, and regex groups might be addressed in the replace field');
 		
@@ -317,6 +387,66 @@ class FindAndReplaceModal extends Modal {
 
 		// Create and show selection toggle switch only if any text is selected
 		const selToggleComponent = addToggleComponent('Replace only in selection', 'If enabled, replaces only occurances in the currently selected text', noSelection);
+
+        const updatePreview = () => {
+            const pattern = findInputComponent.getValue();
+            const useRegex = regToggleComponent.getValue();
+            // Clear highlights if not using regex or empty
+            if (!useRegex || !pattern) {
+                previewInfo.setText('Matches: 0');
+                this.plugin.clearHighlights();
+                previewList.empty();
+                return;
+            }
+            const flags = regexFlags;
+            const selOnly = selToggleComponent.getValue();
+            let targetText = selOnly ? editor.getSelection() : editor.getValue();
+            let startOffset = 0;
+            if (selOnly) {
+                try {
+                    const fromPos = editor.getCursor('from');
+                    startOffset = (editor as any).posToOffset(fromPos) ?? 0;
+                } catch (e) { startOffset = 0; }
+            }
+            try {
+                const re = new RegExp(pattern, flags);
+                const ranges: { from: number; to: number }[] = [];
+                let m: RegExpExecArray | null;
+                const items: { text: string; from: number; to: number }[] = [];
+                while ((m = re.exec(targetText)) !== null) {
+                    const start = m.index;
+                    const end = start + (m[0]?.length ?? 0);
+                    if (end > start) {
+                        ranges.push({ from: startOffset + start, to: startOffset + end });
+                        items.push({ text: m[0] ?? '', from: startOffset + start, to: startOffset + end });
+                    }
+                    // Avoid zero-length infinite loops
+                    if (m[0]?.length === 0) re.lastIndex++;
+                }
+                previewInfo.setText(`Matches: ${ranges.length}`);
+                this.plugin.setHighlights(ranges);
+                // Render list (limit to 200 entries)
+                previewList.empty();
+                const limit = 200;
+                const show = items.slice(0, limit);
+                for (let i = 0; i < show.length; i++) {
+                    const it = show[i];
+                    const fromPos = (editor as any).offsetToPos(it.from);
+                    const el = previewList.createDiv({ cls: 'preview-item' });
+                    el.createEl('span', { cls: 'preview-index', text: String(i + 1) });
+                    el.createEl('span', { cls: 'preview-text', text: it.text });
+                    el.createEl('span', { cls: 'preview-pos', text: `@ ${fromPos.line + 1}:${fromPos.ch + 1}` });
+                }
+                if (items.length > limit) {
+                    const more = previewList.createDiv({ cls: 'preview-more' });
+                    more.setText(`… ${items.length - limit} more`);
+                }
+            } catch (e) {
+                previewInfo.setText('Invalid regex');
+                this.plugin.clearHighlights();
+                previewList.empty();
+            }
+        };
 
 		// Create Buttons
 		const buttonContainerEl = document.createElement(divClass);
@@ -420,6 +550,9 @@ class FindAndReplaceModal extends Modal {
 			this.settings.selOnly = selToggleComponent.getValue();
 			this.plugin.saveData(this.settings);
 
+                // Clear highlights after execution
+                this.plugin.setHighlights([]);
+
 			this.close();
 			new Notice(resultString);					
 		});
@@ -439,6 +572,13 @@ class FindAndReplaceModal extends Modal {
 			logger('Restore find text', 9);
 			findInputComponent.setValue(this.settings.findText);
 		}
+
+        // Wire up preview updates
+        findInputComponent.onChange(updatePreview);
+        regToggleComponent.onChange(updatePreview);
+        selToggleComponent.onChange(updatePreview);
+        // Initial preview
+        updatePreview();
 		
 		// Add button row to dialog
 		buttonContainerEl.appendChild(submitButtonTarget);
@@ -452,6 +592,8 @@ class FindAndReplaceModal extends Modal {
 	onClose() {
 		const { contentEl } = this;
 		contentEl.empty();
+        // Clear any remaining highlights when modal closes
+        this.plugin.clearHighlights();
 	}
 }
 
