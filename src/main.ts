@@ -365,7 +365,7 @@ class FindAndReplaceModal extends Modal {
 		const replaceRow = addTextComponent('Replace:', 'e.g. $1', this.settings.processLineBreak ? '\\n=LF' : '');
 		const replaceWithInputComponent = replaceRow[0];
 
-        // Preview info (matches count)
+        // Preview info (matches count) - also mirror into postfix label
         const previewInfo = contentEl.createDiv({ cls: 'row' });
         previewInfo.addClass('preview-info');
         previewInfo.setText('Matches: 0');
@@ -394,6 +394,7 @@ class FindAndReplaceModal extends Modal {
             // Clear highlights if not using regex or empty
             if (!useRegex || !pattern) {
                 previewInfo.setText('Matches: 0');
+                findRegexFlags.setText('/' + regexFlags + ' • Matches: 0');
                 this.plugin.clearHighlights();
                 previewList.empty();
                 return;
@@ -424,6 +425,7 @@ class FindAndReplaceModal extends Modal {
                     if (m[0]?.length === 0) re.lastIndex++;
                 }
                 previewInfo.setText(`Matches: ${ranges.length}`);
+                findRegexFlags.setText('/' + flags + ` • Matches: ${ranges.length}`);
                 this.plugin.setHighlights(ranges);
                 // Render list (limit to 200 entries)
                 previewList.empty();
@@ -436,6 +438,11 @@ class FindAndReplaceModal extends Modal {
                     el.createEl('span', { cls: 'preview-index', text: String(i + 1) });
                     el.createEl('span', { cls: 'preview-text', text: it.text });
                     el.createEl('span', { cls: 'preview-pos', text: `@ ${fromPos.line + 1}:${fromPos.ch + 1}` });
+                    el.addEventListener('click', () => {
+                        const from = (editor as any).offsetToPos(it.from);
+                        const to = (editor as any).offsetToPos(it.to);
+                        editor.setSelection(from, to);
+                    });
                 }
                 if (items.length > limit) {
                     const more = previewList.createDiv({ cls: 'preview-more' });
@@ -443,6 +450,7 @@ class FindAndReplaceModal extends Modal {
                 }
             } catch (e) {
                 previewInfo.setText('Invalid regex');
+                findRegexFlags.setText('/' + regexFlags + ' • Invalid regex');
                 this.plugin.clearHighlights();
                 previewList.empty();
             }
