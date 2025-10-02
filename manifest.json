@@ -2,9 +2,9 @@
 	"author": "Martin Eder",
 	"authorUrl": "https://www.gruware.org",
 	"description": "Find and replace text using regular expressions.",
-	"id": "obsidian-regex-replace",
+	"id": "obsidian-multi-regex-replace",
 	"isDesktopOnly": false,
 	"minAppVersion": "0.12.17",
-	"name": "Regex Find/Replace",
+	"name": "obsidian-multi-regex-replace",
 	"version": "1.2.0"
 }

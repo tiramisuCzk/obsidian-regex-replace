@@ -1,36 +1,54 @@
 import {
-	App,
-	ButtonComponent,
-	Editor,
-	Modal,
-	Notice,
-	Plugin,
-	TextComponent,
-	ToggleComponent,
-	PluginSettingTab,
-	Setting
+    App,
+    ButtonComponent,
+    Editor,
+    Modal,
+    Notice,
+    Plugin,
+    TextComponent,
+    ToggleComponent,
+    PluginSettingTab,
+    Setting,
+    SuggestModal,
+    MarkdownView
 } from 'obsidian';
 
 interface RfrPluginSettings {
-	findText: string;
-	replaceText: string;
-	useRegEx: boolean;
-	selOnly: boolean;
-	caseInsensitive: boolean;
-	processLineBreak: boolean;
-	processTab: boolean;
-	prefillFind: boolean;
+    findText: string;
+    replaceText: string;
+    useRegEx: boolean;
+    selOnly: boolean;
+    caseInsensitive: boolean;
+    processLineBreak: boolean;
+    processTab: boolean;
+    prefillFind: boolean;
+    savedExpressions: SavedExpression[];
+    savedGroups: ExpressionGroup[];
+}
+
+interface SavedExpression {
+    name: string;
+    pattern: string;
+    flags: string;
+    replace: string;
+}
+
+interface ExpressionGroup {
+    name: string;
+    items: string[]; // expression names
 }
 
 const DEFAULT_SETTINGS: RfrPluginSettings = {
-	findText: '',
-	replaceText: '',
-	useRegEx: true,
-	selOnly: false,
-	caseInsensitive: false,
-	processLineBreak: false,
-	processTab: false,
-	prefillFind: false
+    findText: '',
+    replaceText: '',
+    useRegEx: true,
+    selOnly: false,
+    caseInsensitive: false,
+    processLineBreak: false,
+    processTab: false,
+    prefillFind: false,
+    savedExpressions: [],
+    savedGroups: []
 }
 
 // logThreshold: 0 ... only error messages
@@ -39,23 +57,70 @@ const logThreshold = 9;
 const logger = (logString: string, logLevel=0): void => {if (logLevel <= logThreshold) console.log ('RegexFiRe: ' + logString)};
 
 export default class RegexFindReplacePlugin extends Plugin {
-	settings: RfrPluginSettings;
+    settings: RfrPluginSettings;
 
-	async onload() {
-		logger('Loading Plugin...', 9);
-		await this.loadSettings();
+    async onload() {
+        logger('Loading Plugin...', 9);
+        await this.loadSettings();
 
-		this.addSettingTab(new RegexFindReplaceSettingTab(this.app, this));
+        this.addSettingTab(new RegexFindReplaceSettingTab(this.app, this));
 
 
-		this.addCommand({
-			id: 'obsidian-regex-replace',
-			name: 'Find and Replace using regular expressions',
-			editorCallback: (editor) => {
-				new FindAndReplaceModal(this.app, editor, this.settings, this).open();
-			},
-		});
-	}
+        this.addCommand({
+            id: 'obsidian-regex-replace',
+            name: '正则查找替换',
+            editorCallback: (editor) => {
+                new FindAndReplaceModal(this.app, editor, this.settings, this).open();
+            },
+        });
+
+        // Save current regex (find/replace + flags) as named expression
+        this.addCommand({
+            id: 'save-current-regex-named',
+            name: '保存为命名表达式',
+            callback: () => {
+                const flags = this.getRegexFlags();
+                const preset: SavedExpression = {
+                    name: '',
+                    pattern: this.settings.findText || '',
+                    flags,
+                    replace: this.settings.replaceText || ''
+                };
+                new SaveExpressionModal(this.app, this, preset).open();
+            }
+        });
+
+        // Run a saved expression by name
+        this.addCommand({
+            id: 'run-saved-regex-by-name',
+            name: '运行已保存表达式',
+            editorCallback: (editor) => {
+                new RunSavedExpressionSuggest(this.app, this, (expr) => {
+                    this.applyExpression(editor, expr);
+                }).open();
+            }
+        });
+
+        // Run multiple saved expressions
+        this.addCommand({
+            id: 'run-multiple-saved-regex',
+            name: '批量运行表达式',
+            editorCallback: (editor) => {
+                new BatchApplyModal(this.app, this, editor).open();
+            }
+        });
+
+        // Run a saved group preset
+        this.addCommand({
+            id: 'run-saved-group',
+            name: '运行预设',
+            editorCallback: (editor) => {
+                new RunSavedGroupSuggest(this.app, this, (group) => {
+                    this.applyGroup(editor, group);
+                }).open();
+            }
+        });
+    }
 
 	onunload() {
 		logger('Bye!', 9);
@@ -71,9 +136,90 @@ export default class RegexFindReplacePlugin extends Plugin {
 
 	}
 
-	async saveSettings() {
-		await this.saveData(this.settings);
-	}
+    async saveSettings() {
+        await this.saveData(this.settings);
+    }
+
+    getRegexFlags(): string {
+        let flags = 'gm';
+        if (this.settings.caseInsensitive) flags = flags.concat('i');
+        return flags;
+    }
+
+    saveOrUpdateExpression(expr: SavedExpression): void {
+        const idx = this.settings.savedExpressions.findIndex(e => e.name === expr.name);
+        if (idx >= 0) this.settings.savedExpressions[idx] = expr; else this.settings.savedExpressions.push(expr);
+        this.saveSettings();
+        new Notice(`Saved expression: ${expr.name}`);
+    }
+
+    deleteExpressionByName(name: string): void {
+        this.settings.savedExpressions = this.settings.savedExpressions.filter(e => e.name !== name);
+        this.saveSettings();
+        new Notice(`Deleted expression: ${name}`);
+    }
+
+    saveOrUpdateGroup(group: ExpressionGroup): void {
+        const idx = this.settings.savedGroups.findIndex(g => g.name === group.name);
+        if (idx >= 0) this.settings.savedGroups[idx] = group; else this.settings.savedGroups.push(group);
+        this.saveSettings();
+        new Notice(`Saved preset: ${group.name}`);
+    }
+
+    deleteGroupByName(name: string): void {
+        this.settings.savedGroups = this.settings.savedGroups.filter(g => g.name !== name);
+        this.saveSettings();
+        new Notice(`Deleted preset: ${name}`);
+    }
+
+    applyExpression(editor: Editor, expr: SavedExpression): void {
+        const searchRegex = new RegExp(expr.pattern, expr.flags);
+        let replaceString = expr.replace;
+        // Process special sequences in replace string
+        if (this.settings.processLineBreak) replaceString = replaceString.replace(/\\n/gm, '\n');
+        if (this.settings.processTab) replaceString = replaceString.replace(/\\t/gm, '\t');
+
+        if (!this.settings.selOnly) {
+            const documentText = editor.getValue();
+            const rresult = documentText.match(searchRegex);
+            if (rresult) {
+                editor.setValue(documentText.replace(searchRegex, replaceString));
+                new Notice(`Applied '${expr.name}': ${rresult.length} replacement(s) in document`);
+            } else new Notice(`No match for '${expr.name}' in document`);
+        } else {
+            const selectedText = editor.getSelection();
+            const rresult = selectedText.match(searchRegex);
+            if (rresult) {
+                editor.replaceSelection(selectedText.replace(searchRegex, replaceString));
+                new Notice(`Applied '${expr.name}': ${rresult.length} replacement(s) in selection`);
+            } else new Notice(`No match for '${expr.name}' in selection`);
+        }
+    }
+
+    applyBatch(editor: Editor, exprs: SavedExpression[]): void {
+        if (!exprs.length) { new Notice('No expressions selected'); return; }
+        let total = 0;
+        let text = this.settings.selOnly ? editor.getSelection() : editor.getValue();
+        for (const expr of exprs) {
+            const searchRegex = new RegExp(expr.pattern, expr.flags);
+            let replaceString = expr.replace;
+            if (this.settings.processLineBreak) replaceString = replaceString.replace(/\\n/gm, '\n');
+            if (this.settings.processTab) replaceString = replaceString.replace(/\\t/gm, '\t');
+            const hits = text.match(searchRegex);
+            if (hits) {
+                total += hits.length;
+                text = text.replace(searchRegex, replaceString);
+            }
+        }
+        if (this.settings.selOnly) editor.replaceSelection(text); else editor.setValue(text);
+        new Notice(`Batch applied ${exprs.length} expression(s), ${total} replacement(s)`);
+    }
+
+    applyGroup(editor: Editor, group: ExpressionGroup): void {
+        const exprs = this.settings.savedExpressions.filter(e => group.items.includes(e.name));
+        if (exprs.length === 0) { new Notice(`Preset '${group.name}' has no valid expressions`); return; }
+        this.applyBatch(editor, exprs);
+    }
 
 }
 
@@ -310,16 +456,16 @@ class FindAndReplaceModal extends Modal {
 }
 
 class RegexFindReplaceSettingTab extends PluginSettingTab {
-	plugin: RegexFindReplacePlugin;
+    plugin: RegexFindReplacePlugin;
 
 	constructor(app: App, plugin: RegexFindReplacePlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
-	display(): void {
-		const {containerEl} = this;
-		containerEl.empty();
+    display(): void {
+        const {containerEl} = this;
+        containerEl.empty();
 
 		containerEl.createEl('h4', {text: 'Regular Expression Settings'});
 
@@ -349,15 +495,326 @@ class RegexFindReplaceSettingTab extends PluginSettingTab {
 				}));
 
 
-		new Setting(containerEl)
-			.setName('Prefill Find Field')
-			.setDesc('Copy the currently selected text (if any) into the \'Find\' text field. This setting is only applied if the selection does not contain linebreaks')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.prefillFind)
-				.onChange(async (value) => {
-					logger('Settings update: prefillFind: ' + value);
-					this.plugin.settings.prefillFind = value;
-					await this.plugin.saveSettings();
-				}));
-	}
+        new Setting(containerEl)
+            .setName('Prefill Find Field')
+            .setDesc('Copy the currently selected text (if any) into the \'Find\' text field. This setting is only applied if the selection does not contain linebreaks')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.prefillFind)
+                .onChange(async (value) => {
+                    logger('Settings update: prefillFind: ' + value);
+                    this.plugin.settings.prefillFind = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        // Saved expressions management
+        containerEl.createEl('h4', {text: 'Saved Expressions'});
+
+        // Add Expression button
+        const addContainer = containerEl.createDiv();
+        const addButton = new ButtonComponent(addContainer);
+        addButton.setButtonText('Add Expression');
+        addButton.onClick(() => {
+            const preset: SavedExpression = { name: '', pattern: this.plugin.settings.findText || '', flags: this.plugin.getRegexFlags(), replace: this.plugin.settings.replaceText || '' };
+            new SaveExpressionModal(this.app, this.plugin, preset, () => this.display()).open();
+        });
+
+        // List saved expressions
+        if (this.plugin.settings.savedExpressions.length === 0) {
+            const emptyEl = containerEl.createDiv();
+            emptyEl.setText('No saved expressions yet.');
+        } else {
+            this.plugin.settings.savedExpressions.forEach(expr => {
+                const row = new Setting(containerEl)
+                    .setName(expr.name)
+                    .setDesc(`/${expr.flags}  pattern: ${expr.pattern}  replace: ${expr.replace}`);
+                row.addButton(btn => btn.setButtonText('Edit').onClick(() => {
+                    new SaveExpressionModal(this.app, this.plugin, {...expr}, () => this.display()).open();
+                }));
+                row.addButton(btn => btn.setWarning().setButtonText('Delete').onClick(() => {
+                    this.plugin.deleteExpressionByName(expr.name);
+                    this.display();
+                }));
+            });
+        }
+
+        // Saved groups management
+        containerEl.createEl('h4', { text: 'Saved Presets (Groups)' });
+
+        const addGroupContainer = containerEl.createDiv();
+        const addGroupButton = new ButtonComponent(addGroupContainer);
+        addGroupButton.setButtonText('Add Preset');
+        addGroupButton.onClick(() => {
+            new SaveGroupModal(this.app, this.plugin).open();
+        });
+
+        if (this.plugin.settings.savedGroups.length === 0) {
+            const emptyGroupsEl = containerEl.createDiv();
+            emptyGroupsEl.setText('No presets yet. Save from batch dialog or here.');
+        } else {
+            this.plugin.settings.savedGroups.forEach(group => {
+                const row = new Setting(containerEl)
+                    .setName(group.name)
+                    .setDesc(`Items: ${group.items.join(', ')}`);
+                row.addButton(btn => btn.setButtonText('Run').onClick(() => {
+                    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+                    const editor = view?.editor;
+                    if (!editor) { new Notice('No active editor'); return; }
+                    this.plugin.applyGroup(editor, group);
+                }));
+                row.addButton(btn => btn.setButtonText('Edit').onClick(() => {
+                    new SaveGroupModal(this.app, this.plugin, group, () => this.display()).open();
+                }));
+                row.addButton(btn => btn.setWarning().setButtonText('Delete').onClick(() => {
+                    this.plugin.deleteGroupByName(group.name);
+                    this.display();
+                }));
+            });
+        }
+    }
+}
+
+// Modal to save or edit a named expression
+class SaveExpressionModal extends Modal {
+    plugin: RegexFindReplacePlugin;
+    expr: SavedExpression;
+    onSaved?: () => void;
+
+    constructor(app: App, plugin: RegexFindReplacePlugin, preset: SavedExpression, onSaved?: () => void) {
+        super(app);
+        this.plugin = plugin;
+        this.expr = preset;
+        this.onSaved = onSaved;
+    }
+
+    onOpen() {
+        const { contentEl, titleEl } = this;
+        titleEl.setText('Save Named Expression');
+
+        const nameRow = contentEl.createDiv({ cls: 'row' });
+        nameRow.createDiv({ cls: 'input-label' }).setText('Name:');
+        const nameWrap = nameRow.createDiv({ cls: 'input-wrapper' });
+        const nameInput = new TextComponent(nameWrap);
+        nameInput.setPlaceholder('e.g. Title case');
+        nameInput.setValue(this.expr.name || '');
+
+        const pattRow = contentEl.createDiv({ cls: 'row' });
+        pattRow.createDiv({ cls: 'input-label' }).setText('Pattern:');
+        const pattWrap = pattRow.createDiv({ cls: 'input-wrapper' });
+        const pattInput = new TextComponent(pattWrap);
+        pattInput.setPlaceholder('e.g. (.*)');
+        pattInput.setValue(this.expr.pattern || '');
+
+        const flagsRow = contentEl.createDiv({ cls: 'row' });
+        flagsRow.createDiv({ cls: 'input-label' }).setText('Flags:');
+        const flagsWrap = flagsRow.createDiv({ cls: 'input-wrapper' });
+        const flagsInput = new TextComponent(flagsWrap);
+        flagsInput.setPlaceholder('e.g. gmi');
+        flagsInput.setValue(this.expr.flags || this.plugin.getRegexFlags());
+
+        const replRow = contentEl.createDiv({ cls: 'row' });
+        replRow.createDiv({ cls: 'input-label' }).setText('Replace:');
+        const replWrap = replRow.createDiv({ cls: 'input-wrapper' });
+        const replInput = new TextComponent(replWrap);
+        replInput.setPlaceholder('e.g. $1');
+        replInput.setValue(this.expr.replace || '');
+
+        const btnRow = contentEl.createDiv({ cls: 'row button-wrapper' });
+        const saveBtn = new ButtonComponent(btnRow);
+        saveBtn.setCta();
+        saveBtn.setButtonText('Save');
+        saveBtn.onClick(() => {
+            const name = nameInput.getValue().trim();
+            const pattern = pattInput.getValue();
+            const flags = flagsInput.getValue().trim() || 'gm';
+            const replace = replInput.getValue();
+            if (!name) { new Notice('Name is required'); return; }
+            try {
+                // Validate regex
+                // eslint-disable-next-line no-new
+                new RegExp(pattern, flags);
+            } catch (e) {
+                new Notice('Invalid pattern or flags');
+                return;
+            }
+            this.plugin.saveOrUpdateExpression({ name, pattern, flags, replace });
+            this.close();
+            if (this.onSaved) this.onSaved();
+        });
+
+        const cancelBtn = new ButtonComponent(btnRow);
+        cancelBtn.setButtonText('Cancel');
+        cancelBtn.onClick(() => this.close());
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+// Suggest modal to pick a saved expression by name
+class RunSavedExpressionSuggest extends SuggestModal<SavedExpression> {
+    plugin: RegexFindReplacePlugin;
+    onChoose: (expr: SavedExpression) => void;
+
+    constructor(app: App, plugin: RegexFindReplacePlugin, onChoose: (expr: SavedExpression) => void) {
+        super(app);
+        this.plugin = plugin;
+        this.onChoose = onChoose;
+        this.setPlaceholder('Type to search saved expressions...');
+    }
+
+    getSuggestions(query: string): SavedExpression[] {
+        const q = query.toLowerCase();
+        return this.plugin.settings.savedExpressions.filter(e => e.name.toLowerCase().includes(q));
+    }
+
+    renderSuggestion(expr: SavedExpression, el: HTMLElement) {
+        el.createEl('div', { text: expr.name });
+        el.createEl('small', { text: `/${expr.flags} ${expr.pattern} -> ${expr.replace}` });
+    }
+
+    onChooseSuggestion(expr: SavedExpression) {
+        this.onChoose(expr);
+    }
+}
+
+// Batch apply multiple saved expressions
+class BatchApplyModal extends Modal {
+    plugin: RegexFindReplacePlugin;
+    editor: Editor;
+    selected: Record<string, boolean> = {};
+
+    constructor(app: App, plugin: RegexFindReplacePlugin, editor: Editor) {
+        super(app);
+        this.plugin = plugin;
+        this.editor = editor;
+    }
+
+    onOpen() {
+        const { contentEl, titleEl } = this;
+        titleEl.setText('批量运行表达式');
+        if (this.plugin.settings.savedExpressions.length === 0) {
+            contentEl.setText('No saved expressions available. Create some in Settings.');
+            return;
+        }
+
+        this.plugin.settings.savedExpressions.forEach(expr => {
+            const row = contentEl.createDiv({ cls: 'row' });
+            const labelEl = row.createDiv({ cls: 'check-label' });
+            labelEl.setText(expr.name);
+            const targetEl = row.createDiv({ cls: 'row' });
+            const toggle = new ToggleComponent(targetEl);
+            toggle.setTooltip(`${expr.pattern} -> ${expr.replace}`);
+            toggle.onChange(v => { this.selected[expr.name] = v; });
+        });
+
+        const btnRow = contentEl.createDiv({ cls: 'row button-wrapper' });
+        const runBtn = new ButtonComponent(btnRow);
+        runBtn.setCta();
+        runBtn.setButtonText('Run');
+        runBtn.onClick(() => {
+            const names = Object.keys(this.selected).filter(n => this.selected[n]);
+            const exprs = this.plugin.settings.savedExpressions.filter(e => names.includes(e.name));
+            this.plugin.applyBatch(this.editor, exprs);
+            this.close();
+        });
+
+        const savePresetBtn = new ButtonComponent(btnRow);
+        savePresetBtn.setButtonText('保存为预设');
+        savePresetBtn.onClick(() => {
+            const names = Object.keys(this.selected).filter(n => this.selected[n]);
+            new SaveGroupModal(this.app, this.plugin, { name: '', items: names }).open();
+        });
+
+        const cancelBtn = new ButtonComponent(btnRow);
+        cancelBtn.setButtonText('Cancel');
+        cancelBtn.onClick(() => this.close());
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+// Modal to save or edit a group preset
+class SaveGroupModal extends Modal {
+    plugin: RegexFindReplacePlugin;
+    group: ExpressionGroup;
+    onSaved?: () => void;
+
+    constructor(app: App, plugin: RegexFindReplacePlugin, preset?: ExpressionGroup, onSaved?: () => void) {
+        super(app);
+        this.plugin = plugin;
+        this.group = preset ?? { name: '', items: [] };
+        this.onSaved = onSaved;
+    }
+
+    onOpen() {
+        const { contentEl, titleEl } = this;
+        titleEl.setText('保存预设');
+
+        const nameRow = contentEl.createDiv({ cls: 'row' });
+        nameRow.createDiv({ cls: 'input-label' }).setText('名称:');
+        const nameWrap = nameRow.createDiv({ cls: 'input-wrapper' });
+        const nameInput = new TextComponent(nameWrap);
+        nameInput.setPlaceholder('例如：文档清理');
+        nameInput.setValue(this.group.name || '');
+
+        contentEl.createEl('div', { cls: 'row' }).createEl('div', { cls: 'input-label', text: '选择表达式：' });
+        const selected: Record<string, boolean> = {};
+        this.plugin.settings.savedExpressions.forEach(expr => {
+            const row = contentEl.createDiv({ cls: 'row' });
+            const labelEl = row.createDiv({ cls: 'check-label' });
+            labelEl.setText(expr.name);
+            const targetEl = row.createDiv({ cls: 'row' });
+            const toggle = new ToggleComponent(targetEl);
+            const pre = this.group.items?.includes(expr.name) ?? false;
+            toggle.setValue(pre);
+            selected[expr.name] = pre;
+            toggle.onChange(v => { selected[expr.name] = v; });
+        });
+
+        const btnRow = contentEl.createDiv({ cls: 'row button-wrapper' });
+        const saveBtn = new ButtonComponent(btnRow);
+        saveBtn.setCta();
+        saveBtn.setButtonText('保存');
+        saveBtn.onClick(() => {
+            const name = nameInput.getValue().trim();
+            if (!name) { new Notice('名称必填'); return; }
+            const items = Object.keys(selected).filter(n => selected[n]);
+            if (!items.length) { new Notice('请至少选择一个表达式'); return; }
+            this.plugin.saveOrUpdateGroup({ name, items });
+            this.close();
+            if (this.onSaved) this.onSaved();
+        });
+
+        const cancelBtn = new ButtonComponent(btnRow);
+        cancelBtn.setButtonText('取消');
+        cancelBtn.onClick(() => this.close());
+    }
+
+    onClose() { this.contentEl.empty(); }
+}
+
+// Suggest modal to pick a saved group preset
+class RunSavedGroupSuggest extends SuggestModal<ExpressionGroup> {
+    plugin: RegexFindReplacePlugin;
+    onChoose: (group: ExpressionGroup) => void;
+
+    constructor(app: App, plugin: RegexFindReplacePlugin, onChoose: (group: ExpressionGroup) => void) {
+        super(app);
+        this.plugin = plugin;
+        this.onChoose = onChoose;
+        this.setPlaceholder('搜索预设...');
+    }
+
+    getSuggestions(query: string): ExpressionGroup[] {
+        const q = query.toLowerCase();
+        return this.plugin.settings.savedGroups.filter(g => g.name.toLowerCase().includes(q));
+    }
+
+    renderSuggestion(group: ExpressionGroup, el: HTMLElement) {
+        el.createEl('div', { text: group.name });
+        el.createEl('small', { text: `Items: ${group.items.join(', ')}` });
+    }
+
+    onChooseSuggestion(group: ExpressionGroup) {
+        this.onChoose(group);
+    }
 }
