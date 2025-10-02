@@ -434,10 +434,27 @@ class FindAndReplaceModal extends Modal {
                 for (let i = 0; i < show.length; i++) {
                     const it = show[i];
                     const fromPos = (editor as any).offsetToPos(it.from);
+                    const lineStartOffset = (editor as any).posToOffset({ line: fromPos.line, ch: 0 });
+                    const relStart = it.from - lineStartOffset;
+                    const relEnd = it.to - lineStartOffset;
+
+                    const lineText = editor.getRange({ line: fromPos.line, ch: 0 }, { line: fromPos.line, ch: 1000000 });
+                    const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    const before = escapeHtml(lineText.slice(0, relStart));
+                    const match = escapeHtml(lineText.slice(relStart, relEnd));
+                    const after = escapeHtml(lineText.slice(relEnd));
+
                     const el = previewList.createDiv({ cls: 'preview-item' });
-                    el.createEl('span', { cls: 'preview-index', text: String(i + 1) });
-                    el.createEl('span', { cls: 'preview-text', text: it.text });
-                    el.createEl('span', { cls: 'preview-pos', text: `@ ${fromPos.line + 1}:${fromPos.ch + 1}` });
+                    // Left: full line content with bolded match
+                    const contentEl = el.createEl('div', { cls: 'preview-line-content' });
+                    contentEl.innerHTML = `${before}<strong>${match}</strong>${after}`;
+                    // Right: line number (clickable)
+                    const lineEl = el.createEl('div', { cls: 'preview-line-number', text: String(fromPos.line + 1) });
+                    lineEl.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        editor.setCursor({ line: fromPos.line, ch: 0 });
+                    });
+                    // Click on item selects the exact match
                     el.addEventListener('click', () => {
                         const from = (editor as any).offsetToPos(it.from);
                         const to = (editor as any).offsetToPos(it.to);

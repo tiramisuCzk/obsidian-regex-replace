@@ -73,21 +73,23 @@
 
 .find-replace-modal .modal-content .preview-item {
     display: flex;
-    gap: 8px;
-    padding: 2px 0;
-    align-items: baseline;
+    gap: 12px;
+    padding: 4px 0;
+    align-items: center;
 }
-.find-replace-modal .modal-content .preview-index {
-    color: var(--text-muted);
-    width: 24px;
-    text-align: right;
-}
-.find-replace-modal .modal-content .preview-text {
+.find-replace-modal .modal-content .preview-line-content {
     flex: 1;
     color: var(--text-normal);
+    white-space: pre-wrap;
 }
-.find-replace-modal .modal-content .preview-pos {
-    color: var(--text-faint);
+.find-replace-modal .modal-content .preview-line-content strong {
+    font-weight: 700;
+}
+.find-replace-modal .modal-content .preview-line-number {
+    min-width: 44px;
+    text-align: right;
+    color: var(--text-muted);
+    cursor: pointer;
 }
 .find-replace-modal .modal-content .preview-more {
     margin-top: 4px;
