@@ -427,43 +427,76 @@ class FindAndReplaceModal extends Modal {
                 previewInfo.setText(`Matches: ${ranges.length}`);
                 findRegexFlags.setText('/' + flags + ` • Matches: ${ranges.length}`);
                 this.plugin.setHighlights(ranges);
-                // Render list (limit to 200 entries)
+                // Group by line and render per-line with all matches bolded
                 previewList.empty();
-                const limit = 200;
-                const show = items.slice(0, limit);
-                for (let i = 0; i < show.length; i++) {
-                    const it = show[i];
+                const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const lineMap = new Map<number, { lineText: string; ranges: { startRel: number; endRel: number }[] }>();
+                for (const it of items) {
                     const fromPos = (editor as any).offsetToPos(it.from);
                     const lineStartOffset = (editor as any).posToOffset({ line: fromPos.line, ch: 0 });
-                    const relStart = it.from - lineStartOffset;
-                    const relEnd = it.to - lineStartOffset;
+                    const startRel = it.from - lineStartOffset;
+                    const endRel = it.to - lineStartOffset;
+                    let entry = lineMap.get(fromPos.line);
+                    if (!entry) {
+                        const lineText = editor.getRange({ line: fromPos.line, ch: 0 }, { line: fromPos.line, ch: 1000000 });
+                        entry = { lineText, ranges: [] };
+                        lineMap.set(fromPos.line, entry);
+                    }
+                    entry.ranges.push({ startRel, endRel });
+                }
 
-                    const lineText = editor.getRange({ line: fromPos.line, ch: 0 }, { line: fromPos.line, ch: 1000000 });
-                    const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                    const before = escapeHtml(lineText.slice(0, relStart));
-                    const match = escapeHtml(lineText.slice(relStart, relEnd));
-                    const after = escapeHtml(lineText.slice(relEnd));
+                // Sort lines ascending
+                const sortedLines = Array.from(lineMap.entries()).sort((a, b) => a[0] - b[0]);
+                const maxLines = 200;
+                for (let i = 0; i < Math.min(sortedLines.length, maxLines); i++) {
+                    const [lineIndex, entry] = sortedLines[i];
+                    const { lineText } = entry;
+                    const ranges = entry.ranges
+                        .filter(r => r.endRel > r.startRel)
+                        .sort((a, b) => a.startRel - b.startRel);
+                    // Merge overlapping ranges
+                    const merged: { startRel: number; endRel: number }[] = [];
+                    for (const r of ranges) {
+                        if (!merged.length || r.startRel > merged[merged.length - 1].endRel) {
+                            merged.push({ ...r });
+                        } else {
+                            merged[merged.length - 1].endRel = Math.max(merged[merged.length - 1].endRel, r.endRel);
+                        }
+                    }
+                    let cursor = 0;
+                    let html = '';
+                    for (const r of merged) {
+                        if (r.startRel > cursor) {
+                            html += escapeHtml(lineText.slice(cursor, r.startRel));
+                        }
+                        html += `<strong>${escapeHtml(lineText.slice(r.startRel, r.endRel))}</strong>`;
+                        cursor = r.endRel;
+                    }
+                    html += escapeHtml(lineText.slice(cursor));
 
                     const el = previewList.createDiv({ cls: 'preview-item' });
-                    // Left: full line content with bolded match
                     const contentEl = el.createEl('div', { cls: 'preview-line-content' });
-                    contentEl.innerHTML = `${before}<strong>${match}</strong>${after}`;
-                    // Right: line number (clickable)
-                    const lineEl = el.createEl('div', { cls: 'preview-line-number', text: String(fromPos.line + 1) });
+                    contentEl.innerHTML = html;
+                    const lineEl = el.createEl('div', { cls: 'preview-line-number', text: String(lineIndex + 1) });
                     lineEl.addEventListener('click', (ev) => {
                         ev.stopPropagation();
-                        editor.setCursor({ line: fromPos.line, ch: 0 });
+                        editor.setCursor({ line: lineIndex, ch: 0 });
                     });
-                    // Click on item selects the exact match
                     el.addEventListener('click', () => {
-                        const from = (editor as any).offsetToPos(it.from);
-                        const to = (editor as any).offsetToPos(it.to);
-                        editor.setSelection(from, to);
+                        if (merged.length > 0) {
+                            const fromAbs = (editor as any).posToOffset({ line: lineIndex, ch: merged[0].startRel });
+                            const toAbs = (editor as any).posToOffset({ line: lineIndex, ch: merged[0].endRel });
+                            const from = (editor as any).offsetToPos(fromAbs);
+                            const to = (editor as any).offsetToPos(toAbs);
+                            editor.setSelection(from, to);
+                        } else {
+                            editor.setCursor({ line: lineIndex, ch: 0 });
+                        }
                     });
                 }
-                if (items.length > limit) {
+                if (sortedLines.length > maxLines) {
                     const more = previewList.createDiv({ cls: 'preview-more' });
-                    more.setText(`… ${items.length - limit} more`);
+                    more.setText(`… ${sortedLines.length - maxLines} more lines`);
                 }
             } catch (e) {
                 previewInfo.setText('Invalid regex');
