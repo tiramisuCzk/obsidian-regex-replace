@@ -1,4 +1,4 @@
-![release](https://img.shields.io/github/v/release/Gru80/obsidian-regex-replace)
+![release](https://img.shields.io/github/v/release/tiramisuCzk/obsidian-regex-replace)
 ![downloads](https://img.shields.io/github/downloads/Gru80/obsidian-regex-replace/total.svg)
 
 # Obsidian Plugin - Regex Find/Replace
